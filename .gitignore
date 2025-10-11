@@ -1,0 +1,17 @@
+# CSV files
+*.csv
+
+# macOS system files
+.DS_Store
+.DS_Store?
+
+# Python
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+
+
+
+
