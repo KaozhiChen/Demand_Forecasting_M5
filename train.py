@@ -3,6 +3,7 @@ import argparse
 import torch
 import torch.nn as nn
 from torch.optim import Adam
+from tqdm import tqdm
 import mlflow
 import mlflow.pytorch
 
@@ -33,7 +34,8 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
 
-    for x, y in loader:
+    pbar = tqdm(loader, desc="Training", leave=False)
+    for x, y in pbar:
         x = x.to(device)  # (B, L, F)
         y = y.to(device)  # (B, 1)
 
@@ -44,6 +46,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
         optimizer.step()
 
         total_loss += loss.item() * x.size(0)
+        pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
     return total_loss / len(loader.dataset)
 
@@ -52,13 +55,15 @@ def eval_one_epoch(model, loader, criterion, device):
     model.eval()
     total_loss = 0.0
 
+    pbar = tqdm(loader, desc="Validating", leave=False)
     with torch.no_grad():
-        for x, y in loader:
+        for x, y in pbar:
             x = x.to(device)
             y = y.to(device)
             y_pred = model(x)
             loss = criterion(y_pred, y)
             total_loss += loss.item() * x.size(0)
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
     return total_loss / len(loader.dataset)
 
