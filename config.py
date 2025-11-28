@@ -42,6 +42,10 @@ class TrainConfig:
     batch_size: int = 128
     lr: float = 1e-3
     epochs: int = 20
+    
+    # Early stopping configuration
+    early_stop_patience: int = 5  
+    early_stop_min_delta: float = 0.0  
 
     device: str = "cuda" if torch.cuda.is_available() else (
         "mps" if torch.backends.mps.is_available() else "cpu"

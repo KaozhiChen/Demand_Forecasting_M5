@@ -84,6 +84,10 @@ def main():
         help="Random seed for reproducibility",
     )
     args = parser.parse_args()
+    
+    # Early stopping configuration from config
+    patience = train_config.early_stop_patience
+    min_delta = train_config.early_stop_min_delta
 
     # Set random seeds for reproducibility
     torch.manual_seed(args.seed)
@@ -140,6 +144,9 @@ def main():
             "stride": data_config.stride,
             "input_dim": input_dim,
             "device": str(device),
+            "early_stop": True,
+            "patience": patience,
+            "min_delta": min_delta,
         })
         
         # Log model architecture info
@@ -152,6 +159,7 @@ def main():
 
         best_val_loss = float("inf")
         best_state = None
+        patience_counter = 0  # Counter for early stopping
 
         # 3. Training loop
         for epoch in range(1, args.epochs + 1):
@@ -171,10 +179,24 @@ def main():
                 "val_loss": val_loss,
             }, step=epoch)
 
-            # Simple best model selection
-            if val_loss < best_val_loss:
+            # Early stopping logic (enabled by default for all models)
+            # Check if validation loss improved
+            if val_loss < best_val_loss - min_delta:
                 best_val_loss = val_loss
                 best_state = model.state_dict()
+                patience_counter = 0  # Reset counter on improvement
+                print(f"[Info] Validation loss improved to {best_val_loss:.4f}")
+            else:
+                patience_counter += 1
+                print(f"[Info] No improvement for {patience_counter}/{patience} epochs")
+                
+                # Early stopping trigger
+                if patience_counter >= patience:
+                    print(f"[Info] Early stopping triggered after {epoch} epochs")
+                    print(f"[Info] Best validation loss: {best_val_loss:.4f}")
+                    mlflow.log_param("early_stopped", True)
+                    mlflow.log_param("stopped_at_epoch", epoch)
+                    break
 
         # 4. Save best model checkpoint
         if best_state is not None:
