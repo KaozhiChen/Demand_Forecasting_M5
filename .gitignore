@@ -12,6 +12,10 @@ __pycache__/
 .vscode/
 .idea/
 
+# MLflow
+mlruns/
+*.pth
+
 
 
 

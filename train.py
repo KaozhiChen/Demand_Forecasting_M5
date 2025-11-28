@@ -3,6 +3,8 @@ import argparse
 import torch
 import torch.nn as nn
 from torch.optim import Adam
+import mlflow
+import mlflow.pytorch
 
 from config import data_config, train_config
 from data import load_ca1_features, create_dataloaders
@@ -75,12 +77,29 @@ def main():
         default=train_config.epochs,
         help="Number of training epochs",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility",
+    )
     args = parser.parse_args()
+
+    # Set random seeds for reproducibility
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    if torch.backends.mps.is_available():
+        torch.mps.manual_seed(args.seed)
+    import numpy as np
+    np.random.seed(args.seed)
+    import random
+    random.seed(args.seed)
 
     # Device selection (from config)
     device_str = train_config.device
     device = torch.device(device_str)
     print(f"[Info] Using device: {device}")
+    print(f"[Info] Random seed: {args.seed}")
 
     # 1. Load data
     print("[Info] Loading data...")
@@ -107,36 +126,83 @@ def main():
     optimizer = Adam(model.parameters(), lr=train_config.lr)
     print("[Info] Starting training...")
 
-    best_val_loss = float("inf")
-    best_state = None
+    # Initialize MLflow
+    mlflow.set_experiment("M5_Demand_Forecasting")
+    
+    with mlflow.start_run(run_name=f"{args.model}_{args.epochs}epochs"):
+        # Log hyperparameters
+        mlflow.log_params({
+            "model": args.model,
+            "epochs": args.epochs,
+            "batch_size": train_config.batch_size,
+            "learning_rate": train_config.lr,
+            "seq_len": data_config.seq_len,
+            "stride": data_config.stride,
+            "input_dim": input_dim,
+            "device": str(device),
+        })
+        
+        # Log model architecture info
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        mlflow.log_params({
+            "total_parameters": total_params,
+            "trainable_parameters": trainable_params,
+        })
 
-    # 3. Training loop
-    for epoch in range(1, args.epochs + 1):
-        print(f"[Epoch {epoch:02d}/{args.epochs}] Training...")
-        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-        print(f"[Epoch {epoch:02d}/{args.epochs}] Validating...")
-        val_loss = eval_one_epoch(model, val_loader, criterion, device)
+        best_val_loss = float("inf")
+        best_state = None
 
-        print(
-            f"[Epoch {epoch:02d}] "
-            f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}"
-        )
+        # 3. Training loop
+        for epoch in range(1, args.epochs + 1):
+            print(f"[Epoch {epoch:02d}/{args.epochs}] Training...")
+            train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+            print(f"[Epoch {epoch:02d}/{args.epochs}] Validating...")
+            val_loss = eval_one_epoch(model, val_loader, criterion, device)
 
-        # Simple best model selection
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_state = model.state_dict()
+            print(
+                f"[Epoch {epoch:02d}] "
+                f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}"
+            )
 
-    # 4. Save best model checkpoint
-    if best_state is not None:
-        model.load_state_dict(best_state)
-        checkpoint_path = f"{args.model}_best.pth"
-        torch.save(best_state, checkpoint_path)
-        print(f"[Info] Best model saved to {checkpoint_path}")
+            # Log metrics for each epoch
+            mlflow.log_metrics({
+                "train_loss": train_loss,
+                "val_loss": val_loss,
+            }, step=epoch)
 
-    # 5. Test set evaluation (using best model)
-    test_loss = eval_one_epoch(model, test_loader, criterion, device)
-    print(f"[Test] MSE={test_loss:.4f}")
+            # Simple best model selection
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = model.state_dict()
+
+        # 4. Save best model checkpoint
+        if best_state is not None:
+            model.load_state_dict(best_state)
+            checkpoint_path = f"{args.model}_best.pth"
+            torch.save(best_state, checkpoint_path)
+            print(f"[Info] Best model saved to {checkpoint_path}")
+            
+            # Log best validation loss
+            mlflow.log_metric("best_val_loss", best_val_loss)
+            
+            # Save model to MLflow
+            mlflow.pytorch.log_model(model, "model")
+            
+            # Also log the checkpoint file as artifact
+            mlflow.log_artifact(checkpoint_path)
+
+        # 5. Test set evaluation (using best model)
+        test_loss = eval_one_epoch(model, test_loader, criterion, device)
+        print(f"[Test] MSE={test_loss:.4f}")
+        
+        # Log test metrics
+        mlflow.log_metrics({
+            "test_mse": test_loss,
+            "test_rmse": test_loss ** 0.5,  # RMSE = sqrt(MSE)
+        })
+        
+        print(f"[Info] MLflow run ID: {mlflow.active_run().info.run_id}")
 
 
 if __name__ == "__main__":

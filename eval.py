@@ -3,6 +3,8 @@ import argparse
 import torch
 import pandas as pd
 import numpy as np
+import mlflow
+import mlflow.pytorch
 
 from config import data_config, train_config
 from data import load_ca1_features
@@ -159,6 +161,20 @@ def main():
     print(f"RMSE: {rmse:.4f}")
     print(f"MAPE: {mape:.2f}%")
     print("=====================================\n")
+    
+    # Log metrics to MLflow (if running in MLflow context)
+    try:
+        if mlflow.active_run() is not None:
+            mlflow.log_metrics({
+                "eval_mae": mae,
+                "eval_rmse": rmse,
+                "eval_mape": mape,
+            })
+            mlflow.log_artifact(output_path)
+            print(f"[Info] Evaluation metrics logged to MLflow")
+    except Exception as e:
+        # If not in MLflow context, just continue
+        pass
 
 
 if __name__ == "__main__":
