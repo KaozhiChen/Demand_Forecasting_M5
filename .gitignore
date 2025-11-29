@@ -1,7 +1,7 @@
 # CSV files
 *.csv
 # Exception: allow CSV files in models_and_metrics folder
-!models/models_and_metrics/*.csv
+!models_and_metrics/*.csv
 
 # macOS system files
 .DS_Store
@@ -18,7 +18,7 @@ __pycache__/
 mlruns/
 *.pth
 # Exception: allow .pth files in models_and_metrics folder
-!models/models_and_metrics/*.pth
+!models_and_metrics/*.pth
 
 
 
