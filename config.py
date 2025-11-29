@@ -15,22 +15,24 @@ class DataConfig:
     # target
     target_col: str = "sales"
 
-    # features used by ALL models
-    simple_features: tuple = (
+    # features can directly feat into linear layers
+    continuous_features: tuple = (
         "sales",
-        "wday",
-        "month",
-        "year",
         "snap_CA",
         "is_holiday",
-    )
-
-    # date positional encoding (Transformer-D)
-    date_pe_features: tuple = (
-        "day_of_year",
         "doy_sin",
         "doy_cos",
     )
+
+    # date embedding features
+    categorical_features: tuple = (
+        "wday",  
+        "month",  
+    )
+
+    @property
+    def all_features(self):
+        return self.continuous_features + self.categorical_features
 
     # temporal split
     train_end: datetime = datetime(2014, 12, 31)
