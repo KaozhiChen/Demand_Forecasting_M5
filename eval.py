@@ -33,25 +33,10 @@ def predict_next_day(model, history_window, device):
         return y_hat.detach().cpu().numpy().item()
 
 
-# 2. Recursive 28-day forecast for each item (no normalization)
+# 2. Recursive 28-day forecast for each item
 def forecast_28_days(model, df_item, feature_cols, seq_len, device):
     """
-    Perform multi-step (28 days) forecast for a single item, aligned to the last 28 days.
-
-    Logic:
-    - Use the seq_len days *before* the last 28 days as the initial history.
-    - Then roll forward one day at a time, predicting the last 28 days.
-    
-    Args:
-        model: Trained model
-        df_item: DataFrame for a single item (full history)
-        feature_cols: List of feature column names
-        seq_len: Sequence length
-        device: torch device
-    
-    Returns:
-        preds_28: list of 28 predicted values
-        true_28:  numpy array of 28 true sales values (aligned in time)
+    Perform multi-step (28 days) forecast for a single item.
     """
     df_item = df_item.sort_values("date")
     data = df_item[feature_cols].values.astype(np.float32)
@@ -69,27 +54,33 @@ def forecast_28_days(model, df_item, feature_cols, seq_len, device):
     true_28 = df_item["sales"].values[-H:]
 
     # 2) Initial history window: the seq_len days BEFORE the last 28 days
-    #    history covers [N-H-seq_len, ..., N-H-1]
     history = data[N - H - seq_len : N - H].copy()
 
     preds = []
 
-    # 3) Roll forward from day index N-H to N-1 (these are the last 28 days)
-    for step in range(H):
-        target_idx = N - H + step  # index of the target day in data
+    # Find the index of the 'sales' column dynamically
+    # Use target_col from config to be safe
+    try:
+        sales_idx = feature_cols.index(data_config.target_col)
+    except ValueError:
+        # Fallback if target_col is not in features (unlikely)
+        sales_idx = feature_cols.index("sales")
 
-        # Use current history to predict this day's sales
+    # 3) Roll forward
+    for step in range(H):
+        target_idx = N - H + step
+
+        # Predict
         pred = predict_next_day(model, history, device)
         preds.append(pred)
 
-        # Build next_row features:
-        # - Copy real calendar features from that day (date/wday/month/year/...)
-        # - Replace sales with our prediction
+        # Build next_row
         next_row = data[target_idx].copy()
-        sales_idx = feature_cols.index("sales")
+        
+        # Replace the true sales with our prediction (Autoregressive)
         next_row[sales_idx] = pred
 
-        # Slide window: drop the earliest row, append next_row
+        # Slide window
         history = np.vstack([history[1:], next_row])
 
     return preds, true_28
@@ -102,85 +93,75 @@ def main():
         "--model",
         type=str,
         default="lstm",
-        help="Model name: lstm, transformer, etc.",
+        help="Model name: lstm, transformer, transformer_d",
     )
     parser.add_argument(
         "--checkpoint",
         type=str,
         required=True,
-        help="Path to model checkpoint file",
+        help="Path to model checkpoint file (e.g., lstm_best.pth)",
     )
     parser.add_argument(
         "--output",
         type=str,
         default=None,
-        help="Output CSV file path (default: {model}_28day_forecast.csv)",
+        help="Output CSV file path",
     )
     parser.add_argument(
         "--run-id",
         type=str,
         default=None,
-        help="MLflow run ID to log metrics to (if None, creates a new run)",
+        help="MLflow run ID to log metrics to",
     )
     args = parser.parse_args()
 
     device = torch.device(train_config.device)
     print(f"[Info] Using device: {device}")
 
-    # Initialize MLflow
     mlflow.set_experiment("M5_Demand_Forecasting")
     
-    # Start MLflow run (either use existing run_id or create new one)
     if args.run_id:
-        # Log to existing run
         with mlflow.start_run(run_id=args.run_id):
             _evaluate_model(args, device)
     else:
-        # Create new run for evaluation
         with mlflow.start_run(run_name=f"{args.model}_evaluation"):
             _evaluate_model(args, device)
 
 
 def _evaluate_model(args, device):
-    """Internal evaluation function that runs within MLflow context."""
-    # 1. Load data (complete CA1 dataset)
+    """Internal evaluation function."""
+    # 1. Load data
     df = load_ca1_features()
 
-    # 2. Select features based on model type (must match training)
-    if args.model.lower() == "transformer_d":
-        # Transformer-D uses simple_features + date_pe_features
-        feature_cols = list(data_config.simple_features) + list(data_config.date_pe_features)
-        print(f"[Info] Transformer-D: using {len(feature_cols)} features (simple + date_pe)")
-    else:
-        # LSTM and standard Transformer use simple_features only
-        feature_cols = list(data_config.simple_features)
-        print(f"[Info] {args.model}: using {len(feature_cols)} features (simple)")
+    # 2. Select features (Unified Logic now)
+    feature_cols = list(data_config.all_features)
+    print(f"[Info] Using feature columns: {feature_cols}")
     
     input_dim = len(feature_cols)
 
+    # Load Model structure
     model = get_model(args.model, input_dim=input_dim)
+    
+    # Load Weights
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.to(device)
-    print(f"[Info] Model '{args.model}' loaded successfully from {args.checkpoint}")
+    print(f"[Info] Model '{args.model}' loaded from {args.checkpoint}")
         
-    # Log checkpoint path to MLflow
     mlflow.log_param("checkpoint_path", args.checkpoint)
     mlflow.log_param("model", args.model)
 
     # 3. Extract test set
     test_df = df[df["date"] > data_config.val_end]
-
-    # 4. Forecast 28 days for each item
-    results = []
-
     unique_items = test_df["item_id"].unique()
-    print(f"[Info] Forecasting for {len(unique_items)} items...")
+    
+    print(f"[Info] Forecasting for {len(unique_items)} items over 28 days...")
 
+    # 4. Forecast
+    results = []
     pbar = tqdm(unique_items, desc="Forecasting")
     for item in pbar:
         df_item = df[df["item_id"] == item].sort_values("date")
 
-        # Model predictions and true values for the last 28 days
         pred_28, true_28 = forecast_28_days(
             model,
             df_item,
@@ -189,7 +170,6 @@ def _evaluate_model(args, device):
             device=device,
         )
 
-        # Record results
         for i in range(28):
             results.append({
                 "item_id": item,
@@ -198,47 +178,51 @@ def _evaluate_model(args, device):
                 "pred": float(pred_28[i]),
             })
         
-        pbar.set_postfix({"items": f"{len(results)//28}/{len(unique_items)}"})
+        # Simple progress update
+        if len(results) % (28 * 10) == 0:
+            pbar.set_postfix({"count": len(results)//28})
 
     df_result = pd.DataFrame(results)
 
-    # Save results
+    # Save CSV
     output_path = args.output or f"{args.model}_28day_forecast.csv"
     df_result.to_csv(output_path, index=False)
     print(f"[Info] Results saved to {output_path}")
 
-    # 5. Calculate error metrics
+    # 5. Calculate Metrics (Modified: Added MSE, Removed sMAPE)
     tru = df_result["true"].values
     pred = df_result["pred"].values
 
+    # MAE
     mae = np.mean(np.abs(pred - tru))
-    rmse = np.sqrt(np.mean((pred - tru) ** 2))
     
-    # Symmetric Mean Absolute Percentage Error (sMAPE)
-    # sMAPE = (100/n) * Σ(2 * |actual - forecast| / (|actual| + |forecast|))
-    # Avoid division by zero
-    smape = np.mean(2 * np.abs(tru - pred) / (np.abs(tru) + np.abs(pred) + 1e-8)) * 100
+    # MSE & RMSE
+    mse = np.mean((pred - tru) ** 2)
+    rmse = np.sqrt(mse)
     
-    # Pearson correlation coefficient
-    pearson_r, p_value = pearsonr(tru, pred)
+    # Pearson
+    # Handle case where variation is 0 (constant prediction) to avoid warnings
+    if np.std(pred) < 1e-9 or np.std(tru) < 1e-9:
+        pearson_r = 0.0
+    else:
+        pearson_r, _ = pearsonr(tru, pred)
 
     print(f"\n====== FINAL EVALUATION ({args.model.upper()}) ======")
     print(f"MAE:  {mae:.4f}")
+    print(f"MSE:  {mse:.4f}")   # Added
     print(f"RMSE: {rmse:.4f}")
-    print(f"sMAPE: {smape:.4f}%")
-    print(f"Pearson correlation r: {pearson_r:.4f}")
+    print(f"Pearson r: {pearson_r:.4f}")
     print("=====================================\n")
     
-    # Log metrics to MLflow
+    # Log to MLflow
     mlflow.log_metrics({
         "eval_mae": mae,
+        "eval_mse": mse,       # Added
         "eval_rmse": rmse,
-        "eval_smape": smape,
         "eval_pearson_r": pearson_r,
     })
     mlflow.log_artifact(output_path)
-    print(f"[Info] Evaluation metrics logged to MLflow")
-    print(f"[Info] MLflow run ID: {mlflow.active_run().info.run_id}")
+    print(f"[Info] Metrics logged. Run ID: {mlflow.active_run().info.run_id}")
 
 
 if __name__ == "__main__":
