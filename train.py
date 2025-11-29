@@ -6,21 +6,20 @@ from torch.optim import Adam
 from tqdm import tqdm
 import mlflow
 import mlflow.pytorch
-
+import numpy as np
+import random
 from config import data_config, train_config
 from data import load_ca1_features, create_dataloaders
 from models.lstm import LSTM
 from models.transformer import Transformer
-from models.transformer_d import TransformerD
+from models.transformer_d import TransformerD  
 
 
-
-# Model selection (extend here when adding Transformer models)
+# Model selection
 def get_model(model_name: str, input_dim: int) -> nn.Module:
     model_name = model_name.lower()
 
     if model_name == "lstm":
-        # LSTM uses hardcoded config (keep original settings)
         model = LSTM(
             input_dim=input_dim,
             hidden_dim=64,
@@ -28,7 +27,7 @@ def get_model(model_name: str, input_dim: int) -> nn.Module:
             dropout=0.0,
         )
     elif model_name == "transformer":
-        # Standard Transformer reads config from train_config
+        # Standard Transformer
         model = Transformer(
             input_dim=input_dim,
             d_model=train_config.d_model,
@@ -36,24 +35,16 @@ def get_model(model_name: str, input_dim: int) -> nn.Module:
             num_layers=train_config.num_layers,
             dim_feedforward=train_config.dim_feedforward,
             dropout=train_config.dropout,
-            max_seq_len=data_config.seq_len + 10,
+            max_seq_len=data_config.seq_len + 50,
         )
     elif model_name == "transformer_d":
-        # Transformer-D: uses date features as input, no positional encoding
-        model = TransformerD(
-            input_dim=input_dim,
-            d_model=train_config.d_model,
-            nhead=train_config.nhead,
-            num_layers=train_config.num_layers,
-            dim_feedforward=train_config.dim_feedforward,
-            dropout=train_config.dropout,
-        )
+        raise NotImplementedError("TransformerD code is coming next!")
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
     return model
 
-# Training & Validation Loop
+# Training Step
 def train_one_epoch(model, loader, criterion, optimizer, device):
     model.train()
     total_loss = 0.0
@@ -74,7 +65,7 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
 
     return total_loss / len(loader.dataset)
 
-
+# Validation Step
 def eval_one_epoch(model, loader, criterion, device):
     model.eval()
     total_loss = 0.0
@@ -94,59 +85,28 @@ def eval_one_epoch(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(description="M5 Forecasting Training Script")
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="lstm",
-        help="Model name: lstm, transformer, transformer_d",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=train_config.epochs,
-        help="Number of training epochs",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility",
-    )
+    parser.add_argument("--model", type=str, default="lstm", help="lstm, transformer, transformer_d")
+    parser.add_argument("--epochs", type=int, default=train_config.epochs)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     
-    # Early stopping configuration from config
-    patience = train_config.early_stop_patience
-    min_delta = train_config.early_stop_min_delta
-
-    # Set random seeds for reproducibility
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     if torch.backends.mps.is_available():
         torch.mps.manual_seed(args.seed)
-    import numpy as np
     np.random.seed(args.seed)
-    import random
     random.seed(args.seed)
 
-    # Device selection (from config)
-    device_str = train_config.device
-    device = torch.device(device_str)
+    device = torch.device(train_config.device)
     print(f"[Info] Using device: {device}")
-    print(f"[Info] Random seed: {args.seed}")
 
-    # 1. Load data
+    # 1. Load Data
     print("[Info] Loading data...")
     df_all = load_ca1_features()
 
-    # Select features based on model type
-    if args.model.lower() == "transformer_d":
-        # Transformer-D uses simple_features + date_pe_features
-        feature_cols = list(data_config.simple_features) + list(data_config.date_pe_features)
-        print(f"[Info] Transformer-D: using {len(feature_cols)} features (simple + date_pe)")
-    else:
-        # LSTM and standard Transformer use simple_features only
-        feature_cols = list(data_config.simple_features)
-        print(f"[Info] {args.model}: using {len(feature_cols)} features (simple)")
+    feature_cols = data_config.all_features
+    print(f"[Info] Loading features: {feature_cols}")
+    print(f"[Info] Total feature count: {len(feature_cols)}")
     
     input_dim = len(feature_cols)
 
@@ -158,140 +118,65 @@ def main():
         stride=data_config.stride,
     )
 
-    # 2. Initialize model
+    # 2. Model Setup
     print(f"[Info] Building model: {args.model}")
     model = get_model(args.model, input_dim=input_dim).to(device)
-    print(f"[Info] Model moved to {device}")
 
     criterion = nn.MSELoss()
     optimizer = Adam(model.parameters(), lr=train_config.lr)
-    print("[Info] Starting training...")
+    
+    # Early Stopping params
+    patience = train_config.early_stop_patience
+    min_delta = train_config.early_stop_min_delta
+    best_val_loss = float("inf")
+    patience_counter = 0
+    best_state = None
 
-    # Initialize MLflow
+    print("[Info] Starting training...")
     mlflow.set_experiment("M5_Demand_Forecasting")
     
-    with mlflow.start_run(run_name=f"{args.model}_{args.epochs}epochs"):
-        # Log hyperparameters
-        params = {
-            "model": args.model,
-            "epochs": args.epochs,
-            "batch_size": train_config.batch_size,
-            "learning_rate": train_config.lr,
-            "seq_len": data_config.seq_len,
-            "stride": data_config.stride,
-            "input_dim": input_dim,
-            "device": str(device),
-            "early_stop": True,
-            "patience": patience,
-            "min_delta": min_delta,
-        }
-        
-        # Add model-specific hyperparameters
-        if args.model.lower() == "transformer":
-            params.update({
-                "d_model": train_config.d_model,
-                "nhead": train_config.nhead,
-                "num_layers": train_config.num_layers,
-                "dim_feedforward": train_config.dim_feedforward,
-                "dropout": train_config.dropout,
-                "positional_encoding": "standard_sinusoidal",
-            })
-        elif args.model.lower() == "transformer_d":
-            params.update({
-                "d_model": train_config.d_model,
-                "nhead": train_config.nhead,
-                "num_layers": train_config.num_layers,
-                "dim_feedforward": train_config.dim_feedforward,
-                "dropout": train_config.dropout,
-                "positional_encoding": "date_based",
-                "date_features": list(data_config.date_pe_features),
-            })
-        elif args.model.lower() == "lstm":
-            params.update({
-                "hidden_dim": 64,
-                "num_layers": 1,
-                "dropout": 0.0,
-            })
-        
-        mlflow.log_params(params)
-        
-        # Log model architecture info
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    with mlflow.start_run(run_name=f"{args.model}_{args.epochs}ep"):
+        # Log Params
         mlflow.log_params({
-            "total_parameters": total_params,
-            "trainable_parameters": trainable_params,
+            "model": args.model,
+            "input_dim": input_dim,
+            "feature_list": str(feature_cols), 
+            "lr": train_config.lr,
+            "batch_size": train_config.batch_size
         })
 
-        best_val_loss = float("inf")
-        best_state = None
-        patience_counter = 0  # Counter for early stopping
-
-        # 3. Training loop
+        # 3. Training Loop
         for epoch in range(1, args.epochs + 1):
-            print(f"[Epoch {epoch:02d}/{args.epochs}] Training...")
             train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-            print(f"[Epoch {epoch:02d}/{args.epochs}] Validating...")
             val_loss = eval_one_epoch(model, val_loader, criterion, device)
 
-            print(
-                f"[Epoch {epoch:02d}] "
-                f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}"
-            )
+            print(f"[Epoch {epoch:02d}] Train: {train_loss:.4f} | Val: {val_loss:.4f}")
+            mlflow.log_metrics({"train_loss": train_loss, "val_loss": val_loss}, step=epoch)
 
-            # Log metrics for each epoch
-            mlflow.log_metrics({
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-            }, step=epoch)
-
-            # Early stopping logic (enabled by default for all models)
-            # Check if validation loss improved
+            # Early Stopping Check
             if val_loss < best_val_loss - min_delta:
                 best_val_loss = val_loss
                 best_state = model.state_dict()
-                patience_counter = 0  # Reset counter on improvement
-                print(f"[Info] Validation loss improved to {best_val_loss:.4f}")
+                patience_counter = 0
+                print(f"   >>> New best model! Val Loss: {best_val_loss:.4f}")
             else:
                 patience_counter += 1
-                print(f"[Info] No improvement for {patience_counter}/{patience} epochs")
+                print(f"   >>> No improvement. Patience: {patience_counter}/{patience}")
                 
-                # Early stopping trigger
                 if patience_counter >= patience:
-                    print(f"[Info] Early stopping triggered after {epoch} epochs")
-                    print(f"[Info] Best validation loss: {best_val_loss:.4f}")
-                    mlflow.log_param("early_stopped", True)
-                    mlflow.log_param("stopped_at_epoch", epoch)
+                    print(f"[Info] Early stopping at epoch {epoch}")
                     break
 
-        # 4. Save best model checkpoint
+        # 4. Save & Test
         if best_state is not None:
             model.load_state_dict(best_state)
-            checkpoint_path = f"{args.model}_best.pth"
-            torch.save(best_state, checkpoint_path)
-            print(f"[Info] Best model saved to {checkpoint_path}")
-            
-            # Log best validation loss
-            mlflow.log_metric("best_val_loss", best_val_loss)
-            
-            # Save model to MLflow
-            mlflow.pytorch.log_model(model, "model")
-            
-            # Also log the checkpoint file as artifact
-            mlflow.log_artifact(checkpoint_path)
+            torch.save(best_state, f"{args.model}_best.pth")
+            print(f"[Info] Model saved.")
+            mlflow.log_artifact(f"{args.model}_best.pth")
 
-        # 5. Test set evaluation (using best model)
         test_loss = eval_one_epoch(model, test_loader, criterion, device)
-        print(f"[Test] MSE={test_loss:.4f}")
-        
-        # Log test metrics
-        mlflow.log_metrics({
-            "test_mse": test_loss,
-            "test_rmse": test_loss ** 0.5,  # RMSE = sqrt(MSE)
-        })
-        
-        print(f"[Info] MLflow run ID: {mlflow.active_run().info.run_id}")
-
+        print(f"[Test] MSE: {test_loss:.4f}")
+        mlflow.log_metric("test_mse", test_loss)
 
 if __name__ == "__main__":
     main()
