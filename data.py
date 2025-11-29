@@ -17,6 +17,8 @@ def load_ca1_features() -> pd.DataFrame:
         df = pd.read_parquet(path)
 
     df = df.sort_values(["item_id", "date"]).reset_index(drop=True)
+    print("[Data] Applying Log1p transformation to 'sales'...")
+    df["sales"] = np.log1p(df["sales"])
     return df
 
 
