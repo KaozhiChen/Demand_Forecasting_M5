@@ -44,12 +44,20 @@ class TrainConfig:
     epochs: int = 20
     
     # Early stopping configuration
-    early_stop_patience: int = 5  
+    early_stop_patience: int = 3  
     early_stop_min_delta: float = 0.0  
 
     device: str = "cuda" if torch.cuda.is_available() else (
         "mps" if torch.backends.mps.is_available() else "cpu"
     )
+    
+    # Model architecture hyperparameters (used by Transformer models)
+    # Standard Transformer and Transformer-D share these configs
+    d_model: int = 64
+    nhead: int = 4
+    num_layers: int = 2
+    dim_feedforward: int = 128
+    dropout: float = 0.1
 
 
 data_config = DataConfig()

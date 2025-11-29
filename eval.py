@@ -13,7 +13,7 @@ from data import load_ca1_features
 from train import get_model
 
 
-# 1. Predict next day using history window
+# 1. Predict next day using history window (no normalization)
 def predict_next_day(model, history_window, device):
     """
     Predict the next day's sales using a history window.
@@ -28,13 +28,12 @@ def predict_next_day(model, history_window, device):
     """
     model.eval()
     with torch.no_grad():
-        x = torch.tensor(history_window, dtype=torch.float32).unsqueeze(0)
-        x = x.to(device)
+        x = torch.tensor(history_window, dtype=torch.float32).unsqueeze(0).to(device)
         y_hat = model(x)
-        return y_hat.cpu().numpy().item()
+        return y_hat.detach().cpu().numpy().item()
 
 
-# 2. Recursive 28-day forecast for each item
+# 2. Recursive 28-day forecast for each item (no normalization)
 def forecast_28_days(model, df_item, feature_cols, seq_len, device):
     """
     Perform multi-step (28 days) forecast for a single item, aligned to the last 28 days.
@@ -155,7 +154,7 @@ def _evaluate_model(args, device):
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.to(device)
     print(f"[Info] Model '{args.model}' loaded successfully from {args.checkpoint}")
-    
+        
     # Log checkpoint path to MLflow
     mlflow.log_param("checkpoint_path", args.checkpoint)
     mlflow.log_param("model", args.model)

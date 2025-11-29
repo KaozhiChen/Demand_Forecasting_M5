@@ -10,6 +10,7 @@ import mlflow.pytorch
 from config import data_config, train_config
 from data import load_ca1_features, create_dataloaders
 from models.lstm import LSTM
+from models.transformer import Transformer
 
 
 
@@ -18,11 +19,23 @@ def get_model(model_name: str, input_dim: int) -> nn.Module:
     model_name = model_name.lower()
 
     if model_name == "lstm":
+        # LSTM uses hardcoded config (keep original settings)
         model = LSTM(
             input_dim=input_dim,
             hidden_dim=64,
             num_layers=1,
             dropout=0.0,
+        )
+    elif model_name == "transformer":
+        # Standard Transformer reads config from train_config
+        model = Transformer(
+            input_dim=input_dim,
+            d_model=train_config.d_model,
+            nhead=train_config.nhead,
+            num_layers=train_config.num_layers,
+            dim_feedforward=train_config.dim_feedforward,
+            dropout=train_config.dropout,
+            max_seq_len=data_config.seq_len + 10,
         )
     else:
         raise ValueError(f"Unknown model name: {model_name}")
@@ -114,7 +127,7 @@ def main():
     print("[Info] Loading data...")
     df_all = load_ca1_features()
 
-    # For LSTM / baseline Transformer, use simple features first
+    # For LSTM / baseline Transformer, use simple features directly (no normalization)
     feature_cols = data_config.simple_features
     input_dim = len(feature_cols)
 
@@ -140,7 +153,7 @@ def main():
     
     with mlflow.start_run(run_name=f"{args.model}_{args.epochs}epochs"):
         # Log hyperparameters
-        mlflow.log_params({
+        params = {
             "model": args.model,
             "epochs": args.epochs,
             "batch_size": train_config.batch_size,
@@ -152,7 +165,25 @@ def main():
             "early_stop": True,
             "patience": patience,
             "min_delta": min_delta,
-        })
+        }
+        
+        # Add model-specific hyperparameters
+        if args.model.lower() == "transformer":
+            params.update({
+                "d_model": train_config.d_model,
+                "nhead": train_config.nhead,
+                "num_layers": train_config.num_layers,
+                "dim_feedforward": train_config.dim_feedforward,
+                "dropout": train_config.dropout,
+            })
+        elif args.model.lower() == "lstm":
+            params.update({
+                "hidden_dim": 64,
+                "num_layers": 1,
+                "dropout": 0.0,
+            })
+        
+        mlflow.log_params(params)
         
         # Log model architecture info
         total_params = sum(p.numel() for p in model.parameters())
