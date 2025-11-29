@@ -11,6 +11,7 @@ from config import data_config, train_config
 from data import load_ca1_features, create_dataloaders
 from models.lstm import LSTM
 from models.transformer import Transformer
+from models.transformer_d import TransformerD
 
 
 
@@ -36,6 +37,16 @@ def get_model(model_name: str, input_dim: int) -> nn.Module:
             dim_feedforward=train_config.dim_feedforward,
             dropout=train_config.dropout,
             max_seq_len=data_config.seq_len + 10,
+        )
+    elif model_name == "transformer_d":
+        # Transformer-D: uses date features as input, no positional encoding
+        model = TransformerD(
+            input_dim=input_dim,
+            d_model=train_config.d_model,
+            nhead=train_config.nhead,
+            num_layers=train_config.num_layers,
+            dim_feedforward=train_config.dim_feedforward,
+            dropout=train_config.dropout,
         )
     else:
         raise ValueError(f"Unknown model name: {model_name}")
@@ -87,7 +98,7 @@ def main():
         "--model",
         type=str,
         default="lstm",
-        help="Model name: lstm (later: transformer_s, transformer_d, ...)",
+        help="Model name: lstm, transformer, transformer_d",
     )
     parser.add_argument(
         "--epochs",
@@ -127,8 +138,16 @@ def main():
     print("[Info] Loading data...")
     df_all = load_ca1_features()
 
-    # For LSTM / baseline Transformer, use simple features directly (no normalization)
-    feature_cols = data_config.simple_features
+    # Select features based on model type
+    if args.model.lower() == "transformer_d":
+        # Transformer-D uses simple_features + date_pe_features
+        feature_cols = list(data_config.simple_features) + list(data_config.date_pe_features)
+        print(f"[Info] Transformer-D: using {len(feature_cols)} features (simple + date_pe)")
+    else:
+        # LSTM and standard Transformer use simple_features only
+        feature_cols = list(data_config.simple_features)
+        print(f"[Info] {args.model}: using {len(feature_cols)} features (simple)")
+    
     input_dim = len(feature_cols)
 
     train_loader, val_loader, test_loader = create_dataloaders(
@@ -175,6 +194,17 @@ def main():
                 "num_layers": train_config.num_layers,
                 "dim_feedforward": train_config.dim_feedforward,
                 "dropout": train_config.dropout,
+                "positional_encoding": "standard_sinusoidal",
+            })
+        elif args.model.lower() == "transformer_d":
+            params.update({
+                "d_model": train_config.d_model,
+                "nhead": train_config.nhead,
+                "num_layers": train_config.num_layers,
+                "dim_feedforward": train_config.dim_feedforward,
+                "dropout": train_config.dropout,
+                "positional_encoding": "date_based",
+                "date_features": list(data_config.date_pe_features),
             })
         elif args.model.lower() == "lstm":
             params.update({

@@ -146,8 +146,16 @@ def _evaluate_model(args, device):
     # 1. Load data (complete CA1 dataset)
     df = load_ca1_features()
 
-    # 2. Load trained model
-    feature_cols = list(data_config.simple_features)
+    # 2. Select features based on model type (must match training)
+    if args.model.lower() == "transformer_d":
+        # Transformer-D uses simple_features + date_pe_features
+        feature_cols = list(data_config.simple_features) + list(data_config.date_pe_features)
+        print(f"[Info] Transformer-D: using {len(feature_cols)} features (simple + date_pe)")
+    else:
+        # LSTM and standard Transformer use simple_features only
+        feature_cols = list(data_config.simple_features)
+        print(f"[Info] {args.model}: using {len(feature_cols)} features (simple)")
+    
     input_dim = len(feature_cols)
 
     model = get_model(args.model, input_dim=input_dim)
