@@ -8,11 +8,12 @@ import mlflow
 import mlflow.pytorch
 import numpy as np
 import random
+
 from config import data_config, train_config
 from data import load_ca1_features, create_dataloaders
 from models.lstm import LSTM
 from models.transformer import Transformer
-from models.transformer_d import TransformerD  
+from models.transformer_d import TransformerD  # Ensure this file exists now!
 
 
 # Model selection
@@ -27,7 +28,7 @@ def get_model(model_name: str, input_dim: int) -> nn.Module:
             dropout=0.0,
         )
     elif model_name == "transformer":
-        # Standard Transformer
+        # Standard Transformer (Baseline 2)
         model = Transformer(
             input_dim=input_dim,
             d_model=train_config.d_model,
@@ -35,10 +36,21 @@ def get_model(model_name: str, input_dim: int) -> nn.Module:
             num_layers=train_config.num_layers,
             dim_feedforward=train_config.dim_feedforward,
             dropout=train_config.dropout,
-            max_seq_len=data_config.seq_len + 50,
+            # Max length buffer for sinusoidal encoding
+            max_seq_len=data_config.seq_len + 50, 
         )
     elif model_name == "transformer_d":
-        raise NotImplementedError("TransformerD code is coming next!")
+        # --- [NEW] Transformer-D (Our Proposed Model) ---
+        # It takes the same input_dim (total features), 
+        # but internally splits them into continuous and categorical.
+        model = TransformerD(
+            input_dim=input_dim, 
+            d_model=train_config.d_model,
+            nhead=train_config.nhead,
+            num_layers=train_config.num_layers,
+            dim_feedforward=train_config.dim_feedforward,
+            dropout=train_config.dropout,
+        )
     else:
         raise ValueError(f"Unknown model name: {model_name}")
 
@@ -85,11 +97,13 @@ def eval_one_epoch(model, loader, criterion, device):
 
 def main():
     parser = argparse.ArgumentParser(description="M5 Forecasting Training Script")
+    # You can now choose: lstm, transformer, or transformer_d
     parser.add_argument("--model", type=str, default="lstm", help="lstm, transformer, transformer_d")
     parser.add_argument("--epochs", type=int, default=train_config.epochs)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     
+    # Set random seeds
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     if torch.backends.mps.is_available():
@@ -104,6 +118,7 @@ def main():
     print("[Info] Loading data...")
     df_all = load_ca1_features()
 
+    # Load all features defined in config (Hybrid strategy: continuous + categorical)
     feature_cols = data_config.all_features
     print(f"[Info] Loading features: {feature_cols}")
     print(f"[Info] Total feature count: {len(feature_cols)}")

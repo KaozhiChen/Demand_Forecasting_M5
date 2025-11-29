@@ -1,24 +1,23 @@
-# models/transformer_d.py
 import torch
 import torch.nn as nn
 
-
 class TransformerD(nn.Module):
     """
-    Transformer-D: Transformer with Date-based positional encoding.
+    Transformer-D: Date-Aware Transformer.
     
-    Key differences from standard Transformer:
-    - Uses date features (day_of_year, doy_sin, doy_cos) as input features
-    - Removes standard sinusoidal positional encoding layer
-    - Time position information is explicitly encoded in input features
-    
-    Input shape:  (batch, seq_len, input_dim) where input_dim includes date features
-    Output shape: (batch, 1)
+    Core Mechanisms:
+    1. Hybrid Input Processing:
+       - Continuous features (Sales, Sin/Cos, Events) -> Projected via Linear layer.
+       - Categorical features (Wday, Month) -> Mapped via Embedding layers.
+    2. Alternative Positional Encoding:
+       - Removes standard Sinusoidal Positional Encoding.
+       - Uses Wday and Month embeddings as semantic positional information
+         added directly to the feature embeddings.
     """
     
     def __init__(
         self,
-        input_dim: int,
+        input_dim: int,       
         d_model: int = 64,
         nhead: int = 4,
         num_layers: int = 2,
@@ -28,14 +27,34 @@ class TransformerD(nn.Module):
         super().__init__()
         
         self.d_model = d_model
-        self.input_dim = input_dim
         
-        # Input projection
-        self.input_projection = nn.Linear(input_dim, d_model)
+        # 1. Feature Split Definition (Based on config.py order)
+        # config.all_features = continuous_features + categorical_features
+        # Order: [sales, snap, holiday, sin, cos] + [wday, month]
+
+        self.num_cont = 5  # First 5 columns are continuous
+        self.num_cat = 2   # Last 2 columns are categorical (wday, month)
         
-        # NO positional encoding layer - time info comes from input features
+        # Safety check: Ensure input_dim matches our splitting logic
+        if input_dim != self.num_cont + self.num_cat:
+            raise ValueError(
+                f"Input dim mismatch! Expected {self.num_cont + self.num_cat}, got {input_dim}. "
+                "Check config.py feature lists."
+            )
+
+        # 2. Projection & Embedding Layers (The Core Innovation)
         
-        # Transformer encoder
+        # A. Continuous Feature Projection (5 -> d_model)
+        self.cont_projection = nn.Linear(self.num_cont, d_model)
+        
+        # B. Date Feature Embeddings
+        # wday: 1-7. Set size to 8 to accommodate index 7 (index 0 unused)
+        self.wday_emb = nn.Embedding(num_embeddings=8, embedding_dim=d_model)
+        
+        # month: 1-12. Set size to 13 to accommodate index 12 (index 0 unused)
+        self.month_emb = nn.Embedding(num_embeddings=13, embedding_dim=d_model)
+        
+        # 3. Transformer Backbone   
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -48,39 +67,60 @@ class TransformerD(nn.Module):
             num_layers=num_layers,
         )
         
-        # Output projection
+        # 4. Output Head
         self.output_projection = nn.Linear(d_model, 1)
-        
         self.dropout = nn.Dropout(dropout)
+        
         self._init_weights()
-    
+
     def _init_weights(self):
-        """Initialize weights using Xavier uniform."""
+        """Initialize weights: Xavier for Linear, Uniform for Embedding."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.constant_(module.bias, 0.0)
-    
+            elif isinstance(module, nn.Embedding):
+                nn.init.uniform_(module.weight, -0.05, 0.05)
+
     def forward(self, x):
         """
-        x: (batch, seq_len, input_dim)
-        Note: input_dim should include date_pe_features (day_of_year, doy_sin, doy_cos)
+        x shape: (batch, seq_len, 7)
+        
+        Manually slice x based on feature types:
+        - x[:, :, 0:5] -> Continuous (sales, snap, holiday, sin, cos)
+        - x[:, :, 5]   -> Wday (needs casting to long)
+        - x[:, :, 6]   -> Month (needs casting to long)
         """
-        # Input projection: (batch, seq_len, input_dim) -> (batch, seq_len, d_model)
-        x = self.input_projection(x)
+        # Step 1: Slice Inputs
+        x_cont = x[:, :, :self.num_cont]        # (B, L, 5) float32
+        
+        # Must cast to long for Embedding lookup
+        x_wday = x[:, :, 5].long()              # (B, L) int64
+        x_month = x[:, :, 6].long()             # (B, L) int64
+
+        # Step 2: Project & Embed 
+        # Continuous projection
+        feat_emb = self.cont_projection(x_cont) # (B, L, d_model)
+        
+        # Date Embeddings (Semantic position)
+        wday_emb = self.wday_emb(x_wday)        # (B, L, d_model)
+        month_emb = self.month_emb(x_month)     # (B, L, d_model)
+        
+        # Step 3: Combine (Addition)
+        # Core Logic: Content + Date_Position
+        # Here, wday and month embeddings ACT as the positional encoding.
+        x = feat_emb + wday_emb + month_emb
+        
         x = self.dropout(x)
-        
-        # NO positional encoding - time info is already in input features
-        
-        # Transformer encoder: (batch, seq_len, d_model) -> (batch, seq_len, d_model)
+
+        # Step 4: Transformer Encoding 
+        # Note: No self.pos_encoder(x) here because we added date info above.
         x = self.transformer_encoder(x)
         
-        # Use the last time step's output: (batch, seq_len, d_model) -> (batch, d_model)
+        # Step 5: Prediction
+        # Use the output of the last time step
         x = x[:, -1, :]
-        
-        # Output projection: (batch, d_model) -> (batch, 1)
         y_hat = self.output_projection(x)
         
         return y_hat
-
