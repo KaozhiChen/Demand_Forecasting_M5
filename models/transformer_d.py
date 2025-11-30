@@ -1,18 +1,29 @@
+# models/transformer_d.py
 import torch
 import torch.nn as nn
+import math
+
+# PositionalEncoding class
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1), :]
+        return self.dropout(x)
 
 class TransformerD(nn.Module):
     """
-    Transformer-D: Date-Aware Transformer.
-    
-    Core Mechanisms:
-    1. Hybrid Input Processing:
-       - Continuous features (Sales, Sin/Cos, Events) -> Projected via Linear layer.
-       - Categorical features (Wday, Month) -> Mapped via Embedding layers.
-    2. Alternative Positional Encoding:
-       - Removes standard Sinusoidal Positional Encoding.
-       - Uses Wday and Month embeddings as semantic positional information
-         added directly to the feature embeddings.
+    Transformer-D (Final Version):
+    Hybrid Position Encoding = Standard Index PE + Semantic Date Embeddings.
     """
     
     def __init__(
@@ -28,33 +39,21 @@ class TransformerD(nn.Module):
         
         self.d_model = d_model
         
-        # 1. Feature Split Definition (Based on config.py order)
-        # config.all_features = continuous_features + categorical_features
-        # Order: [sales, snap, holiday, sin, cos] + [wday, month]
-
-        self.num_cont = 5  # First 5 columns are continuous
-        self.num_cat = 2   # Last 2 columns are categorical (wday, month)
+        # Feature split: 5 continuous (Sales, Sin, Cos...), 2 categorical (Wday, Month)
+        self.num_cont = 5
+        self.num_cat = 2
         
-        # Safety check: Ensure input_dim matches our splitting logic
-        if input_dim != self.num_cont + self.num_cat:
-            raise ValueError(
-                f"Input dim mismatch! Expected {self.num_cont + self.num_cat}, got {input_dim}. "
-                "Check config.py feature lists."
-            )
-
-        # 2. Projection & Embedding Layers (The Core Innovation)
-        
-        # A. Continuous Feature Projection (5 -> d_model)
+        # 1. Projection layer
         self.cont_projection = nn.Linear(self.num_cont, d_model)
         
-        # B. Date Feature Embeddings
-        # wday: 1-7. Set size to 8 to accommodate index 7 (index 0 unused)
-        self.wday_emb = nn.Embedding(num_embeddings=8, embedding_dim=d_model)
+        # 2. Date Embeddings (capture periodic semantics)
+        self.wday_emb = nn.Embedding(8, d_model)
+        self.month_emb = nn.Embedding(13, d_model)
         
-        # month: 1-12. Set size to 13 to accommodate index 12 (index 0 unused)
-        self.month_emb = nn.Embedding(num_embeddings=13, embedding_dim=d_model)
+        # 3. Standard PE 
+        self.pos_encoder = PositionalEncoding(d_model, dropout, max_len=500)
         
-        # 3. Transformer Backbone   
+        # 4. Transformer Backbone
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -67,59 +66,36 @@ class TransformerD(nn.Module):
             num_layers=num_layers,
         )
         
-        # 4. Output Head
         self.output_projection = nn.Linear(d_model, 1)
-        self.dropout = nn.Dropout(dropout)
-        
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize weights: Xavier for Linear, Uniform for Embedding."""
         for module in self.modules():
             if isinstance(module, nn.Linear):
                 nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0.0)
             elif isinstance(module, nn.Embedding):
                 nn.init.uniform_(module.weight, -0.05, 0.05)
 
     def forward(self, x):
-        """
-        x shape: (batch, seq_len, 7)
-        
-        Manually slice x based on feature types:
-        - x[:, :, 0:5] -> Continuous (sales, snap, holiday, sin, cos)
-        - x[:, :, 5]   -> Wday (needs casting to long)
-        - x[:, :, 6]   -> Month (needs casting to long)
-        """
-        # Step 1: Slice Inputs
-        x_cont = x[:, :, :self.num_cont]        # (B, L, 5) float32
-        
-        # Must cast to long for Embedding lookup
-        x_wday = x[:, :, 5].long()              # (B, L) int64
-        x_month = x[:, :, 6].long()             # (B, L) int64
+        # 1. Manually split input
+        x_cont = x[:, :, :self.num_cont]
+        x_wday = x[:, :, 5].long()
+        x_month = x[:, :, 6].long()
 
-        # Step 2: Project & Embed 
-        # Continuous projection
-        feat_emb = self.cont_projection(x_cont) # (B, L, d_model)
+        # 2. Compute Embeddings
+        feat_emb = self.cont_projection(x_cont)
+        wday_emb = self.wday_emb(x_wday)
+        month_emb = self.month_emb(x_month)
         
-        # Date Embeddings (Semantic position)
-        wday_emb = self.wday_emb(x_wday)        # (B, L, d_model)
-        month_emb = self.month_emb(x_month)     # (B, L, d_model)
-        
-        # Step 3: Combine (Addition)
-        # Core Logic: Content + Date_Position
-        # Here, wday and month embeddings ACT as the positional encoding.
+        # 3. Hybrid mechanism
+        # Content (Feat) + Date Semantics (Wday/Month)
         x = feat_emb + wday_emb + month_emb
         
-        x = self.dropout(x)
+        # 4. Inject sequence order (Standard PE)
+        x = self.pos_encoder(x)
 
-        # Step 4: Transformer Encoding 
-        # Note: No self.pos_encoder(x) here because we added date info above.
+        # 5. Encode and predict
         x = self.transformer_encoder(x)
-        
-        # Step 5: Prediction
-        # Use the output of the last time step
         x = x[:, -1, :]
         y_hat = self.output_projection(x)
         
