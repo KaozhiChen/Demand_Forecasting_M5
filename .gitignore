@@ -2,6 +2,8 @@
 *.csv
 # Exception: allow CSV files in models_and_metrics folder
 !models_and_metrics/*.csv
+# Exception: allow compressed training data
+!Data/training_data.zip
 
 # macOS system files
 .DS_Store
